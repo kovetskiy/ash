@@ -185,26 +185,55 @@ func setupLogger(args map[string]interface{}) {
 func inboxMode(args map[string]interface{}, api Api) {
 	var reviews []PullRequest
 
-	if args["created"] != nil || args["all"] != nil {
-		createdReviews, err := api.GetInbox("author")
-		if err != nil {
-			logger.Critical(
-				"error retrieving inbox for 'created': %s",
-				err.Error(),
-			)
-		}
-		reviews = append(reviews, createdReviews...)
+	roles := map[string]bool{
+		"author": args["created"].(bool),
+		"reviewer": args["reviewing"].(bool),
 	}
 
-	if args["reviewing"] != nil || args["all"] != nil {
-		reviewingReviews, err := api.GetInbox("reviewer")
-		if err != nil {
-			logger.Critical(
-				"error retrieving inbox for 'reviewing': %s",
-				err.Error(),
-			)
+	all := args["all"].(bool)
+
+	if !all {
+		all = true
+		for _, enabled := range roles {
+			if enabled {
+				all = false
+				break
+			}
 		}
-		reviews = append(reviews, reviewingReviews...)
+	}
+
+	if all {
+		for role, _ := range roles {
+			roles[role] = true
+		}
+	}
+
+	chReviews := make(map[string](chan []PullRequest))
+
+	for role, enabled := range roles {
+		if enabled {
+			chReviews[role] = make(chan []PullRequest)
+
+			go func(role string, ch chan []PullRequest) {
+				reviews, err := api.GetInbox(role)
+				if err != nil {
+					logger.Critical(
+						"error retrieving inbox for '%s': %s",
+						role,
+						err.Error(),
+					)
+				}
+
+				ch <- reviews
+			}(role, chReviews[role])
+		}
+	}
+
+	for role, enabled := range roles {
+		if enabled {
+			tmpReviews := <-chReviews[role]
+			reviews = append(reviews, tmpReviews...)
+		}
 	}
 
 	for _, r := range reviews {
