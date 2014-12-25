@@ -31,7 +31,7 @@ var tmpWorkDir = ""
 var panicState = false
 
 const logFormat = "%{color}%{time:15:04:05.00} [%{level:.4s}] %{message}%{color:reset}"
-const startUrlExample = "http[s]://<host>/(users|projects)/<project>/repos/<repo>/pull-requests/<id>"
+const startUrlExample = "http[s]://<host>/(users|projects)/<project>/repos/<repo>/pull-requests/<id>[/<commit>]"
 
 type CmdLineArgs string
 
@@ -67,8 +67,10 @@ If <file-name> is omitted, ash welcomes you to review the overview.
 * projects [NOT IMPLEMENTED];
 
 Usage:
+  ash [options] <project>/<repo>/<pr>/<commit> review [<file-name>] [-w]
   ash [options] <project>/<repo>/<pr> review [<file-name>] [-w]
   ash [options] <project>/<repo>/<pr> ls
+  ash [options] <project>/<repo>/<pr> ls-commits
   ash [options] <project>/<repo>/<pr> (approve|decline)
   ash [options] <project>/<repo> ls-reviews [-d] [(open|merged|declined)]
   ash [options] inbox [-d] [(reviewer|author|all)]
@@ -129,9 +131,12 @@ func main() {
 	project := Project{&api, uri.project}
 	repo := project.GetRepo(uri.repo)
 
+	isReviewMode := args["<project>/<repo>/<pr>"] != nil ||
+		args["<project>/<repo>/<pr>/<commt>"] != nil
+
 	switch {
-	case args["<project>/<repo>/<pr>"] != nil:
-		reviewMode(args, repo, uri.pr)
+	case isReviewMode:
+		reviewMode(args, repo, uri.pr, uri.commit)
 	case args["<project>/<repo>"] != nil:
 		repoMode(args, repo)
 	case args["inbox"].(bool):
@@ -222,7 +227,7 @@ func requestInboxFor(role string, api Api) chan []PullRequest {
 	return resultChannel
 }
 
-func reviewMode(args map[string]interface{}, repo Repo, pr int64) {
+func reviewMode(args map[string]interface{}, repo Repo, pr int64, commit string) {
 	editor := os.Getenv("EDITOR")
 	if args["-e"] != nil {
 		editor = args["-e"].(string)
@@ -243,9 +248,11 @@ func reviewMode(args map[string]interface{}, repo Repo, pr int64) {
 		ignoreWhitespaces = true
 	}
 
-	pullRequest := repo.GetPullRequest(pr)
+	pullRequest := repo.GetPullRequest(pr, commit)
 
 	switch {
+	//case args["ls-commits"]:
+		//showCommitsList(pullRequest)
 	case args["ls"]:
 		showFilesList(pullRequest)
 	case args["review"]:
@@ -341,23 +348,31 @@ func parseUri(args map[string]interface{}) (
 		project string
 		repo    string
 		pr      int64
+		commit  string
 	},
 ) {
 	uri := ""
 	keyName := ""
 	should := 0
 
+	fmt.Printf("%#v\n", args)
+
+	if args["<project>/<repo>/<pr>/<commit>"] != nil {
+		keyName = "<project>/<repo>/<pr>/<commit>"
+		should = 4
+	}
+
 	if args["<project>/<repo>/<pr>"] != nil {
 		keyName = "<project>/<repo>/<pr>"
-		uri = args[keyName].(string)
 		should = 3
 	}
 
 	if args["<project>/<repo>"] != nil {
 		keyName = "<project>/<repo>"
-		uri = args[keyName].(string)
 		should = 2
 	}
+
+	uri = args[keyName].(string)
 
 	matches := reStashURL.FindStringSubmatch(uri)
 	if len(matches) != 0 {
@@ -366,7 +381,7 @@ func parseUri(args map[string]interface{}) (
 		result.repo = matches[5]
 		result.pr, _ = strconv.ParseInt(matches[6], 10, 16)
 
-		return result
+		return
 	}
 
 	if args["--host"] == nil {
@@ -402,14 +417,24 @@ func parseUri(args map[string]interface{}) (
 		result.repo = matches[1]
 	}
 
-	if len(matches) >= 3 && should == 3 {
+	if len(matches) == 3 && should == 3 {
 		result.project = matches[0]
 		result.repo = matches[1]
 		result.pr, _ = strconv.ParseInt(matches[2], 10, 16)
 	}
 
+	if len(matches) >= 4 && should == 4 {
+		result.project = matches[0]
+		result.repo = matches[1]
+		result.pr, _ = strconv.ParseInt(matches[2], 10, 16)
+		result.commit = matches[3]
+	}
+
 	enough := result.project != "" && result.repo != "" &&
 		(result.pr != 0 || should == 2)
+
+	fmt.Printf("%#v\n", should)
+	fmt.Printf("%#v\n", result)
 
 	if !enough {
 		fmt.Println(
@@ -420,13 +445,15 @@ func parseUri(args map[string]interface{}) (
 		os.Exit(1)
 	}
 
+	os.Exit(1)
+
 	if result.project[0] == '~' || result.project[0] == '%' {
 		result.project = "users/" + result.project[1:]
 	} else {
 		result.project = "projects/" + result.project
 	}
 
-	return result
+	return
 }
 
 func editReviewInEditor(

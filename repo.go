@@ -12,11 +12,19 @@ type Repo struct {
 	Resource *gopencils.Resource
 }
 
-func (repo *Repo) GetPullRequest(id int64) PullRequest {
+func (repo *Repo) GetPullRequest(id int64, commit string) PullRequest {
+	var res *gopencils.Resource
+
+	if commit == "" {
+		res = repo.Resource.Res("pull-requests").Id(fmt.Sprint(id))
+	} else {
+		res = repo.Resource.Res("pull-requests").Id(fmt.Sprint(id)).Res("commits").Id(commit)
+	}
+
 	return PullRequest{
 		Repo:     repo,
 		Id:       id,
-		Resource: repo.Resource.Res("pull-requests").Id(fmt.Sprint(id)),
+		Resource: res,
 	}
 }
 
