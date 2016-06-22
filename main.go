@@ -39,6 +39,8 @@ const logFormat = "%{time:15:04:05.00} [%{level:.4s}] %{message}"
 const logFormatColor = "%{color}" + logFormat + "%{color:reset}"
 
 const startUrlExample = "http[s]://<host>/(users|projects)/<project>/repos/<repo>/pull-requests/<id>"
+const formatPullRequest = `%slug%\t%branch%\t%updated%\t%author%\t%comments%\t+%approves%/%reviewers_count%\t%pending_reviewers%`
+const formatPullRequestWithStatus = formatPullRequest + `\t%status%`
 
 type CmdLineArgs string
 
@@ -92,16 +94,18 @@ Options:
   -w                 Ignore whitespaces
   -e=<editor>        Editor to use. This has priority over $EDITOR env var.
   -i                 Interactive mode. Ask before commiting changes.
+  -f <format>        Use specified print format.
+				     [default: ` + formatPullRequest + `]
   --debug=<level>    Verbosity [default: 0].
   --url=<url>        Stash server URL.  http:// will be used if no protocol is
-                     specified.
+                      specified.
   --input=<input>    File for loading diff in review file
   --output=<output>  Output review to specified file. Editor is ignored.
   --origin=<origin>  Do not download review from stash and use specified file
-                     instead.
+                      instead.
   --project=<proj>   Use to specify default project that can be used when
-                     serching pull requests. Can be set in either <project> or
-                     <project>/<repo> format.
+                      serching pull requests. Can be set in either <project> or
+                      <project>/<repo> format.
   --no-color         Do not use color in output.
 `
 
@@ -223,6 +227,10 @@ func setupLogger(args map[string]interface{}) {
 }
 
 func inboxMode(args map[string]interface{}, api Api) {
+	var (
+		format = args["-f"].(string)
+	)
+
 	roles := []string{"author", "reviewer"}
 	for _, role := range roles {
 		if args[role].(bool) {
@@ -239,7 +247,9 @@ func inboxMode(args map[string]interface{}, api Api) {
 	writer := tabwriter.NewWriter(os.Stdout, 0, 8, 1, ' ', 0)
 	for _, role := range roles {
 		for _, pullRequest := range <-channels[role] {
-			printPullRequest(writer, pullRequest, args["-d"].(bool), false)
+			printPullRequest(
+				writer, pullRequest, args["-d"].(bool), format,
+			)
 		}
 	}
 	writer.Flush()
@@ -363,11 +373,17 @@ func repoMode(args map[string]interface{}, repo Repo) {
 		case args["merged"]:
 			state = "merged"
 		}
-		showReviewsInRepo(repo, state, args["-d"].(bool))
+
+		format := args["-f"].(string)
+		if format == formatPullRequest {
+			format = formatPullRequestWithStatus
+		}
+
+		showReviewsInRepo(repo, state, args["-d"].(bool), format)
 	}
 }
 
-func showReviewsInRepo(repo Repo, state string, withDesc bool) {
+func showReviewsInRepo(repo Repo, state string, withDesc bool, format string) {
 	reviews, err := repo.ListPullRequest(state)
 
 	if err != nil {
@@ -377,28 +393,40 @@ func showReviewsInRepo(repo Repo, state string, withDesc bool) {
 	writer := tabwriter.NewWriter(os.Stdout, 0, 8, 1, ' ', 0)
 
 	for _, r := range reviews {
-		printPullRequest(writer, r, withDesc, true)
+		printPullRequest(writer, r, withDesc, format)
 	}
 
 	writer.Flush()
 }
 
-func printPullRequest(writer io.Writer, pr PullRequest, withDesc bool, printStatus bool) {
-	slug := fmt.Sprintf("%s/%s/%d",
+func printPullRequest(
+	writer io.Writer,
+	pr PullRequest,
+	withDesc bool,
+	format string,
+) {
+	var (
+		slug             string
+		branch           string
+		updatedAt        string
+		author           string
+		comments         int64
+		approves         int
+		reviewers        []string
+		reviewersPending []string
+	)
+
+	slug = fmt.Sprintf("%s/%s/%d",
 		strings.ToLower(pr.FromRef.Repository.Project.Key),
 		pr.FromRef.Repository.Slug,
 		pr.Id,
 	)
 
-	fmt.Fprintf(writer, "%-30s", slug)
-
 	refSegments := strings.Split(pr.FromRef.Id, "/")
-	branchName := refSegments[len(refSegments)-1]
-	fmt.Fprintf(writer, "\t%s", branchName)
+	branch = refSegments[len(refSegments)-1]
 
 	relativeUpdateDate := time.Since(pr.UpdatedDate.AsTime())
 
-	updatedAt := "now"
 	switch {
 	case relativeUpdateDate.Minutes() < 1:
 		updatedAt = "now"
@@ -416,39 +444,42 @@ func printPullRequest(writer io.Writer, pr PullRequest, withDesc bool, printStat
 		)
 	}
 
-	fmt.Fprintf(writer,
-		"\t%5s %s",
-		updatedAt,
-		pr.Author.User.Name,
-	)
+	author = pr.Author.User.Name
 
-	var approvedCount int
-	var pendingReviewers []string
 	for _, reviewer := range pr.Reviewers {
+		reviewers = append(reviewers, reviewer.User.Name)
 		if reviewer.Approved {
-			approvedCount += 1
+			approves += 1
 		} else {
-			pendingReviewers = append(pendingReviewers, reviewer.User.Name)
+			reviewersPending = append(reviewersPending, reviewer.User.Name)
 		}
 	}
 
-	fmt.Fprintf(
-		writer,
-		"\t%3d +%d/%d",
-		pr.Properties.CommentCount, approvedCount, len(pr.Reviewers),
+	comments = pr.Properties.CommentCount
+
+	sort.Strings(reviewersPending)
+
+	replacer := strings.NewReplacer(
+		`%slug%`, slug,
+		`%branch%`, branch,
+		`%updated%`, updatedAt,
+		`%author%`, author,
+		`%comments%`, fmt.Sprint(comments),
+		`%approves%`, fmt.Sprint(approves),
+		`%reviewers_count%`, fmt.Sprint(len(reviewers)),
+		`%pending_reviewers_count%`, fmt.Sprint(len(reviewersPending)),
+		`%reviewers%`, strings.Join(reviewers, " "),
+		`%pending_reviewers%`, strings.Join(reviewersPending, " "),
+		`%status%`, pr.State,
+		`\t`, "\t",
 	)
 
-	if printStatus {
-		fmt.Fprintf(writer, " %s", pr.State)
-	}
-
-	sort.Strings(pendingReviewers)
-
-	fmt.Fprintf(writer, "\t%s\n", strings.Join(pendingReviewers, " "))
+	fmt.Fprintln(writer, replacer.Replace(format))
 
 	if withDesc && pr.Description != "" {
 		fmt.Fprintln(writer, fmt.Sprintf("\n---\n%s\n---", pr.Description))
 	}
+
 }
 
 func parseUri(args map[string]interface{}) (
